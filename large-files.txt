@@ -1,0 +1,7 @@
+DerivedData/
+*-fpttgpztpqbplphczztlgftglxuo/
+**/XCBuildData/
+**/build.db
+**/grpc.framework/
+**/*.xcbuilddata/
+**/Index.noindex/
