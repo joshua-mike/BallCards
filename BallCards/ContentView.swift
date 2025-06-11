@@ -1,4 +1,3 @@
-// ContentView.swift - Updated with improved processing
 import SwiftUI
 import CoreData
 import Vision
@@ -9,11 +8,14 @@ struct ContentView: View {
 	@State private var isFrontSide = true
 	@State private var activeCard: Card?
 	@State private var isProcessing = false
+	@State private var processingMessage = "Processing card..."
 	@State private var showingNewCardEdit = false
 	@State private var showingCardDetail = false
 	@State private var searchText = ""
 	@State private var sortOption = SortOption.dateAdded
 	@State private var filterTeam: String?
+	@State private var showingError = false
+	@State private var errorMessage = ""
 	
 	@Environment(\.managedObjectContext) private var viewContext
 	
@@ -195,25 +197,39 @@ struct ContentView: View {
 			.overlay(
 				Group {
 					if isProcessing {
-						VStack {
-							ProgressView("Processing card...")
-								.padding()
-								.background(Color.secondary.opacity(0.2))
-								.cornerRadius(10)
+						VStack(spacing: 20) {
+							ProgressView()
+								.scaleEffect(1.5)
+							
+							Text(processingMessage)
+								.font(.headline)
+								.foregroundColor(.primary)
 						}
+						.padding(30)
+						.background(Color(.systemBackground))
+						.cornerRadius(15)
+						.shadow(radius: 10)
 						.frame(maxWidth: .infinity, maxHeight: .infinity)
 						.background(Color.black.opacity(0.3))
 						.edgesIgnoringSafeArea(.all)
 					}
 				}
 			)
+			.alert("Error", isPresented: $showingError) {
+				Button("OK") {
+					errorMessage = ""
+				}
+			} message: {
+				Text(errorMessage)
+			}
 		}
 	}
 	
 	private func processCardImage(_ image: UIImage) {
 		if isFrontSide {
-			// Start processing
+			// Start processing front side
 			isProcessing = true
+			processingMessage = "Analyzing front of card..."
 			
 			// Create a new card
 			let newCard = Card(context: viewContext)
@@ -221,30 +237,58 @@ struct ContentView: View {
 			newCard.dateAdded = Date()
 			newCard.frontImage = image.jpegData(compressionQuality: 0.8)
 			
-			// Use OCR to extract data from the card
-			CardRecognizer.shared.extractCardInfo(from: image) { cardInfo in
-				if let cardInfo = cardInfo {
-					// Update card with extracted information
-					newCard.playerName = cardInfo["playerName"] ?? "Unknown Player"
-					newCard.year = cardInfo["year"] ?? "Unknown Year"
-					newCard.team = cardInfo["team"] ?? "Unknown Team"
-					newCard.cardNumber = cardInfo["cardNumber"]
-				}
-				
-				// Save the new card
-				do {
-					try viewContext.save()
-				} catch {
-					let nsError = error as NSError
-					print("Error saving card: \(nsError), \(nsError.userInfo)")
-				}
-				
-				// Set as active card to continue with back side
-				self.activeCard = newCard
-				
-				// Prompt for back side
+			// Save immediately to avoid losing the image
+			do {
+				try viewContext.save()
+			} catch {
+				handleError("Failed to save card image: \(error.localizedDescription)")
+				return
+			}
+			
+			// Set as active card
+			self.activeCard = newCard
+			
+			// Use OCR to extract data from the card with timeout protection
+			let timeoutWorkItem = DispatchWorkItem {
 				DispatchQueue.main.async {
+					if self.isProcessing {
+						self.isProcessing = false
+						self.processingMessage = "Processing card..."
+						
+						// Continue to back side even if OCR fails
+						self.isFrontSide = false
+						self.isShowingCamera = true
+					}
+				}
+			}
+			
+			// Set a 10-second timeout for OCR
+			DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeoutWorkItem)
+			
+			CardRecognizer.shared.extractCardInfo(from: image) { cardInfo in
+				// Cancel the timeout since we got a response
+				timeoutWorkItem.cancel()
+				
+				DispatchQueue.main.async {
+					if let cardInfo = cardInfo {
+						// Update card with extracted information
+						newCard.playerName = cardInfo["playerName"] ?? "Unknown Player"
+						newCard.year = cardInfo["year"] ?? "Unknown Year"
+						newCard.team = cardInfo["team"] ?? "Unknown Team"
+						newCard.cardNumber = cardInfo["cardNumber"]
+						newCard.series = cardInfo["series"]
+						
+						// Save the updated card data
+						do {
+							try viewContext.save()
+						} catch {
+							print("Error saving card data: \(error)")
+						}
+					}
+					
+					// Continue to back side
 					self.isProcessing = false
+					self.processingMessage = "Processing card..."
 					self.isFrontSide = false
 					self.isShowingCamera = true
 				}
@@ -252,6 +296,7 @@ struct ContentView: View {
 		} else {
 			// Processing back side
 			isProcessing = true
+			processingMessage = "Saving back of card..."
 			
 			if let card = activeCard {
 				card.backImage = image.jpegData(compressionQuality: 0.8)
@@ -260,16 +305,28 @@ struct ContentView: View {
 				do {
 					try viewContext.save()
 				} catch {
-					let nsError = error as NSError
-					print("Error saving card back: \(nsError), \(nsError.userInfo)")
+					handleError("Failed to save card back: \(error.localizedDescription)")
+					return
 				}
 				
 				// Show the edit view after capturing both sides
 				DispatchQueue.main.async {
 					self.isProcessing = false
+					self.processingMessage = "Processing card..."
 					self.showingNewCardEdit = true
 				}
+			} else {
+				handleError("Card data was lost during processing")
 			}
+		}
+	}
+	
+	private func handleError(_ message: String) {
+		DispatchQueue.main.async {
+			self.isProcessing = false
+			self.processingMessage = "Processing card..."
+			self.errorMessage = message
+			self.showingError = true
 		}
 	}
 	
@@ -280,14 +337,12 @@ struct ContentView: View {
 			do {
 				try viewContext.save()
 			} catch {
-				let nsError = error as NSError
-				print("Error deleting card: \(nsError), \(nsError.userInfo)")
+				handleError("Failed to delete card: \(error.localizedDescription)")
 			}
 		}
 	}
 }
 
-// Enhanced Card Row with better layout
 struct CardRow: View {
 	@ObservedObject var card: Card
 	
