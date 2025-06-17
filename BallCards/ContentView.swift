@@ -341,6 +341,7 @@ struct ContentView: View {
 			}
 		}
 	}
+	
 }
 
 struct CardRow: View {
