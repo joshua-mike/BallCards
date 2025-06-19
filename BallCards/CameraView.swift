@@ -17,8 +17,14 @@ struct RealCameraView: UIViewControllerRepresentable {
 	}
 	
 	func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {
-		// Update properties if needed
-		uiViewController.isFrontSide = isFrontSide
+		// FIXED: Update property and title directly without calling viewWillAppear
+		if uiViewController.isFrontSide != isFrontSide {
+			print("📱 CameraView: Updating isFrontSide from \(uiViewController.isFrontSide) to \(isFrontSide)")
+			uiViewController.isFrontSide = isFrontSide
+			
+			// Update title directly instead of calling viewWillAppear
+			uiViewController.updateTitle()
+		}
 	}
 	
 	func makeCoordinator() -> Coordinator {
@@ -57,6 +63,9 @@ struct CameraView: View {
 			isFrontSide: $isFrontSide,
 			onImageCaptured: onImageCaptured
 		)
+		.onAppear {
+			print("📱 CameraView: Appearing with isFrontSide = \(isFrontSide)")
+		}
 	}
 }
 

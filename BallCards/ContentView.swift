@@ -229,96 +229,128 @@ struct ContentView: View {
 		if isFrontSide {
 			// Start processing front side
 			isProcessing = true
-			processingMessage = "Analyzing front of card..."
+			processingMessage = "Analyzing and cropping front of card..."
+			
+			print("🚀 ContentView: Starting to process front image, size: \(image.size)")
 			
 			// Create a new card
 			let newCard = Card(context: viewContext)
 			newCard.id = UUID()
 			newCard.dateAdded = Date()
-			newCard.frontImage = image.jpegData(compressionQuality: 0.8)
-			
-			// Save immediately to avoid losing the image
-			do {
-				try viewContext.save()
-			} catch {
-				handleError("Failed to save card image: \(error.localizedDescription)")
-				return
-			}
 			
 			// Set as active card
 			self.activeCard = newCard
 			
-			// Use OCR to extract data from the card with timeout protection
-			let timeoutWorkItem = DispatchWorkItem {
+			// First attempt: Try advanced cropping
+			CardRecognizer.shared.extractCardInfo(from: image, autoCrop: true) { cardInfo, croppedImage in
 				DispatchQueue.main.async {
-					if self.isProcessing {
-						self.isProcessing = false
-						self.processingMessage = "Processing card..."
-						
-						// Continue to back side even if OCR fails
-						self.isFrontSide = false
-						self.isShowingCamera = true
-					}
-				}
-			}
-			
-			// Set a 10-second timeout for OCR
-			DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeoutWorkItem)
-			
-			CardRecognizer.shared.extractCardInfo(from: image) { cardInfo in
-				// Cancel the timeout since we got a response
-				timeoutWorkItem.cancel()
-				
-				DispatchQueue.main.async {
-					if let cardInfo = cardInfo {
-						// Update card with extracted information
-						newCard.playerName = cardInfo["playerName"] ?? "Unknown Player"
-						newCard.year = cardInfo["year"] ?? "Unknown Year"
-						newCard.team = cardInfo["team"] ?? "Unknown Team"
-						newCard.cardNumber = cardInfo["cardNumber"]
-						newCard.series = cardInfo["series"]
-						
-						// Save the updated card data
-						do {
-							try viewContext.save()
-						} catch {
-							print("Error saving card data: \(error)")
-						}
-					}
+					let finalImage = croppedImage ?? image
 					
-					// Continue to back side
-					self.isProcessing = false
-					self.processingMessage = "Processing card..."
-					self.isFrontSide = false
-					self.isShowingCamera = true
+					// Save the image (cropped or original)
+					newCard.frontImage = finalImage.jpegData(compressionQuality: 0.8)
+					
+					// Check if we got any meaningful data
+					let hasGoodData = cardInfo?["playerName"] != nil ||
+									 cardInfo?["year"] != nil ||
+									 cardInfo?["team"] != nil
+					
+					if !hasGoodData {
+						print("⚠️ ContentView: First attempt didn't get good data, trying fallback...")
+						
+						// Fallback: Try simple cropping
+						CardCropper.shared.simpleCropCard(from: image) { simpleCroppedImage in
+							DispatchQueue.main.async {
+								if let betterImage = simpleCroppedImage {
+									print("🔄 ContentView: Trying OCR again with simple crop...")
+									newCard.frontImage = betterImage.jpegData(compressionQuality: 0.8)
+									
+									// Try OCR again without auto-crop since we manually cropped
+									CardRecognizer.shared.extractCardInfo(from: betterImage, autoCrop: false) { fallbackCardInfo, _ in
+										DispatchQueue.main.async {
+											self.applyCardData(to: newCard, from: fallbackCardInfo)
+											self.continueToBackSide()
+										}
+									}
+								} else {
+									// Use original image if everything fails
+									print("⚠️ ContentView: All cropping failed, using original image")
+									newCard.frontImage = image.jpegData(compressionQuality: 0.8)
+									self.applyCardData(to: newCard, from: cardInfo)
+									self.continueToBackSide()
+								}
+							}
+						}
+					} else {
+						print("✅ ContentView: Got good data from first attempt")
+						self.applyCardData(to: newCard, from: cardInfo)
+						self.continueToBackSide()
+					}
 				}
 			}
 		} else {
 			// Processing back side
 			isProcessing = true
-			processingMessage = "Saving back of card..."
+			processingMessage = "Cropping and saving back of card..."
+			
+			print("🚀 ContentView: Starting to process back image")
 			
 			if let card = activeCard {
-				card.backImage = image.jpegData(compressionQuality: 0.8)
-				
-				// Save the updated card
-				do {
-					try viewContext.save()
-				} catch {
-					handleError("Failed to save card back: \(error.localizedDescription)")
-					return
-				}
-				
-				// Show the edit view after capturing both sides
-				DispatchQueue.main.async {
-					self.isProcessing = false
-					self.processingMessage = "Processing card..."
-					self.showingNewCardEdit = true
+				// Try to crop the back image
+				CardCropper.shared.detectAndCropCard(from: image) { croppedImage in
+					DispatchQueue.main.async {
+						let finalImage = croppedImage ?? image
+						card.backImage = finalImage.jpegData(compressionQuality: 0.8)
+						
+						// Save the updated card
+						do {
+							try viewContext.save()
+							print("✅ ContentView: Successfully saved card with back image")
+						} catch {
+							self.handleError("Failed to save card back: \(error.localizedDescription)")
+							return
+						}
+						
+						// Show the edit view after capturing both sides
+						self.isProcessing = false
+						self.processingMessage = "Processing card..."
+						self.showingNewCardEdit = true
+					}
 				}
 			} else {
 				handleError("Card data was lost during processing")
 			}
 		}
+	}
+
+	// Helper method to apply card data
+	private func applyCardData(to card: Card, from cardInfo: [String: String]?) {
+		if let cardInfo = cardInfo {
+			card.playerName = cardInfo["playerName"] ?? "Unknown Player"
+			card.year = cardInfo["year"] ?? "Unknown Year"
+			card.team = cardInfo["team"] ?? "Unknown Team"
+			card.cardNumber = cardInfo["cardNumber"]
+			card.series = cardInfo["series"]
+			card.manufacturer = cardInfo["manufacturer"]
+			
+			print("✅ ContentView: Applied card data - Name: \(card.playerName ?? "nil"), Year: \(card.year ?? "nil"), Team: \(card.team ?? "nil")")
+		} else {
+			print("⚠️ ContentView: No card info to apply")
+		}
+		
+		// Save the card data
+		do {
+			try viewContext.save()
+		} catch {
+			print("❌ ContentView: Error saving card data: \(error)")
+		}
+	}
+
+	// Helper method to continue to back side
+	private func continueToBackSide() {
+		self.isProcessing = false
+		self.processingMessage = "Processing card..."
+		self.isFrontSide = false
+		self.isShowingCamera = true
 	}
 	
 	private func handleError(_ message: String) {

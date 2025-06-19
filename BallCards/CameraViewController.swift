@@ -28,6 +28,9 @@ class CameraViewController: UIViewController, AVCapturePhotoCaptureDelegate {
 	override func viewWillAppear(_ animated: Bool) {
 		super.viewWillAppear(animated)
 		
+		// Update title when view appears (fixes the title bug)
+		updateTitleText()
+		
 		if !captureSession.isRunning {
 			DispatchQueue.global(qos: .userInitiated).async {
 				self.captureSession.startRunning()
@@ -78,9 +81,9 @@ class CameraViewController: UIViewController, AVCapturePhotoCaptureDelegate {
 		overlayView.layer.borderWidth = 2
 		overlayView.layer.cornerRadius = 8
 		
-		// Title label
+		// Title label - UPDATED: Use helper method for initial setup
 		titleLabel.translatesAutoresizingMaskIntoConstraints = false
-		titleLabel.text = isFrontSide ? "Capture Front of Card" : "Capture Back of Card"
+		updateTitleText() // Use the helper method
 		titleLabel.textColor = .white
 		titleLabel.textAlignment = .center
 		titleLabel.font = UIFont.systemFont(ofSize: 18, weight: .bold)
@@ -105,12 +108,12 @@ class CameraViewController: UIViewController, AVCapturePhotoCaptureDelegate {
 		// Add subviews
 		[overlayView, titleLabel, captureButton, cancelButton].forEach { view.addSubview($0) }
 		
-		// Layout constraints
+		// Layout constraints (same as before)
 		NSLayoutConstraint.activate([
 			overlayView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
 			overlayView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
 			overlayView.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.8),
-			overlayView.heightAnchor.constraint(equalTo: overlayView.widthAnchor, multiplier: 1.4),  // Standard card ratio
+			overlayView.heightAnchor.constraint(equalTo: overlayView.widthAnchor, multiplier: 1.4),
 			
 			titleLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
 			titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
@@ -148,5 +151,14 @@ class CameraViewController: UIViewController, AVCapturePhotoCaptureDelegate {
 		}
 		
 		delegate?.didCaptureImage(image)
+	}
+	
+	func updateTitle() {
+		updateTitleText()
+	}
+
+	// Keep the existing private method
+	private func updateTitleText() {
+		titleLabel.text = isFrontSide ? "Capture Front of Card" : "Capture Back of Card"
 	}
 }
