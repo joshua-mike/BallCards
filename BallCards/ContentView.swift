@@ -16,6 +16,7 @@ struct ContentView: View {
 	@State private var filterTeam: String?
 	@State private var showingError = false
 	@State private var errorMessage = ""
+	@State private var showingQuickEdit = false
 	
 	@Environment(\.managedObjectContext) private var viewContext
 	
@@ -175,6 +176,11 @@ struct ContentView: View {
 					}
 				}
 			}
+			.sheet(isPresented: $showingQuickEdit) {
+				if let card = activeCard {
+					QuickEditCardView(card: card)
+				}
+			}
 			.sheet(isPresented: $isShowingCamera) {
 				CameraView(image: $cardImage, isFrontSide: $isFrontSide) { image in
 					if let image = image {
@@ -229,9 +235,9 @@ struct ContentView: View {
 		if isFrontSide {
 			// Start processing front side
 			isProcessing = true
-			processingMessage = "Analyzing and cropping front of card..."
+			processingMessage = "Scanning front of card..."
 			
-			print("🚀 ContentView: Starting to process front image, size: \(image.size)")
+			print("🚀 ContentView: Starting to process front image")
 			
 			// Create a new card
 			let newCard = Card(context: viewContext)
@@ -241,79 +247,63 @@ struct ContentView: View {
 			// Set as active card
 			self.activeCard = newCard
 			
-			// First attempt: Try advanced cropping
+			// Quick OCR attempt - don't worry about perfection
 			CardRecognizer.shared.extractCardInfo(from: image, autoCrop: true) { cardInfo, croppedImage in
 				DispatchQueue.main.async {
 					let finalImage = croppedImage ?? image
-					
-					// Save the image (cropped or original)
 					newCard.frontImage = finalImage.jpegData(compressionQuality: 0.8)
 					
-					// Check if we got any meaningful data
-					let hasGoodData = cardInfo?["playerName"] != nil ||
-									 cardInfo?["year"] != nil ||
-									 cardInfo?["team"] != nil
-					
-					if !hasGoodData {
-						print("⚠️ ContentView: First attempt didn't get good data, trying fallback...")
-						
-						// Fallback: Try simple cropping
-						CardCropper.shared.simpleCropCard(from: image) { simpleCroppedImage in
-							DispatchQueue.main.async {
-								if let betterImage = simpleCroppedImage {
-									print("🔄 ContentView: Trying OCR again with simple crop...")
-									newCard.frontImage = betterImage.jpegData(compressionQuality: 0.8)
-									
-									// Try OCR again without auto-crop since we manually cropped
-									CardRecognizer.shared.extractCardInfo(from: betterImage, autoCrop: false) { fallbackCardInfo, _ in
-										DispatchQueue.main.async {
-											self.applyCardData(to: newCard, from: fallbackCardInfo)
-											self.continueToBackSide()
-										}
-									}
-								} else {
-									// Use original image if everything fails
-									print("⚠️ ContentView: All cropping failed, using original image")
-									newCard.frontImage = image.jpegData(compressionQuality: 0.8)
-									self.applyCardData(to: newCard, from: cardInfo)
-									self.continueToBackSide()
-								}
-							}
-						}
-					} else {
-						print("✅ ContentView: Got good data from first attempt")
-						self.applyCardData(to: newCard, from: cardInfo)
-						self.continueToBackSide()
+					// Apply any OCR results we got (even if imperfect)
+					if let cardInfo = cardInfo {
+						newCard.playerName = cardInfo["playerName"] ?? "Unknown Player"
+						newCard.year = cardInfo["year"] ?? ""
+						newCard.team = cardInfo["team"] ?? ""
+						newCard.cardNumber = cardInfo["cardNumber"]
+						newCard.manufacturer = cardInfo["manufacturer"]
 					}
+					
+					// Save immediately
+					do {
+						try viewContext.save()
+						print("✅ ContentView: Front side saved")
+					} catch {
+						print("❌ ContentView: Error saving front: \(error)")
+					}
+					
+					// Continue to back side quickly
+					self.isProcessing = false
+					self.processingMessage = "Processing card..."
+					self.isFrontSide = false
+					self.isShowingCamera = true
 				}
 			}
 		} else {
-			// Processing back side
+			// Processing back side - fast and simple
 			isProcessing = true
-			processingMessage = "Cropping and saving back of card..."
+			processingMessage = "Scanning back of card..."
 			
-			print("🚀 ContentView: Starting to process back image")
+			print("🚀 ContentView: Processing back image")
 			
 			if let card = activeCard {
-				// Try to crop the back image
+				// Quick crop attempt for back
 				CardCropper.shared.detectAndCropCard(from: image) { croppedImage in
 					DispatchQueue.main.async {
 						let finalImage = croppedImage ?? image
 						card.backImage = finalImage.jpegData(compressionQuality: 0.8)
 						
-						// Save the updated card
+						// Save the card
 						do {
 							try viewContext.save()
-							print("✅ ContentView: Successfully saved card with back image")
+							print("✅ ContentView: Back side saved")
 						} catch {
-							self.handleError("Failed to save card back: \(error.localizedDescription)")
+							self.handleError("Failed to save card: \(error.localizedDescription)")
 							return
 						}
 						
-						// Show the edit view after capturing both sides
+						// Go straight to quick edit - this is the key change!
 						self.isProcessing = false
 						self.processingMessage = "Processing card..."
-						self.showingNewCardEdit = true
+						self.showingQuickEdit = true  // Show quick edit instead of detailed edit
 					}
 				}
 			} else {
