@@ -186,17 +186,17 @@ class CardRecognizer {
 			}
 			
 			// Look for patterns that might be names
-			let words = cleaned.components(separatedBy: CharacterSet.whitespacesAndPunctuationMarks)
+			let words = cleaned.components(separatedBy: CharacterSet.whitespaces)
 				.filter { !$0.isEmpty && $0.count > 1 }
 			
 			print("   Checking text: '\(cleaned)' -> words: \(words)")
 			
-			// Strategy 1: Look for exactly 2 or 3 words that could be a name
 			if words.count >= 2 && words.count <= 3 {
 				// Check if words look like names (mostly letters)
 				let nameWords = words.filter { word in
 					let letterCount = word.filter { $0.isLetter }.count
-					return letterCount >= word.count * 0.7 // At least 70% letters
+					let minimumLetters = Int(Double(word.count) * 0.7)
+					return letterCount >= minimumLetters
 				}
 				
 				if nameWords.count >= 2 {
