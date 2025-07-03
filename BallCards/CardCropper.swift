@@ -6,7 +6,7 @@ import Accelerate
 class CardCropper {
 	static let shared = CardCropper()
 	
-	// Main detection method using document scanning techniques
+	// Main detection method - simplified and more focused approach
 	func detectAndCropCard(from image: UIImage, completion: @escaping (UIImage?) -> Void) {
 		guard let cgImage = image.cgImage else {
 			print("❌ CardCropper: Failed to get CGImage")
@@ -16,16 +16,21 @@ class CardCropper {
 		
 		print("🔍 CardCropper: Starting detection on image size: \(cgImage.width)x\(cgImage.height)")
 		
-		// Use document-style edge detection approach
 		DispatchQueue.global(qos: .userInitiated).async {
-			if let croppedImage = self.detectCardUsingDocumentScanning(image) {
-				print("✅ CardCropper: Document scanning successful")
+			// Try multiple approaches in order of sophistication
+			if let croppedImage = self.detectCardWithAdaptiveThreshold(image) {
+				print("✅ CardCropper: Adaptive threshold detection successful")
+				DispatchQueue.main.async {
+					completion(croppedImage)
+				}
+			} else if let croppedImage = self.detectCardWithContourAnalysis(image) {
+				print("✅ CardCropper: Contour analysis successful")
 				DispatchQueue.main.async {
 					completion(croppedImage)
 				}
 			} else {
-				print("❌ CardCropper: Document scanning failed, using fallback")
-				let fallback = self.intelligentFallbackCrop(image)
+				print("❌ CardCropper: All methods failed, using smart fallback")
+				let fallback = self.smartCenterCrop(image)
 				DispatchQueue.main.async {
 					completion(fallback)
 				}
@@ -33,62 +38,347 @@ class CardCropper {
 		}
 	}
 	
-	// MARK: - Document Scanning Approach (Similar to TurboScan)
+	// MARK: - Method 1: Adaptive Threshold Detection
 	
-	private func detectCardUsingDocumentScanning(_ image: UIImage) -> UIImage? {
+	private func detectCardWithAdaptiveThreshold(_ image: UIImage) -> UIImage? {
 		guard let cgImage = image.cgImage else { return nil }
 		
-		// Step 1: Convert to grayscale and resize for processing
-		guard let processedImage = prepareImageForProcessing(cgImage) else {
-			print("❌ Failed to prepare image for processing")
+		// Resize to working size for faster processing
+		guard let resizedImage = resizeImageForProcessing(cgImage, maxDimension: 800) else {
 			return nil
 		}
 		
-		// Step 2: Apply Gaussian blur to reduce noise
-		guard let blurredImage = applyGaussianBlur(processedImage) else {
-			print("❌ Failed to apply blur")
+		let width = resizedImage.width
+		let height = resizedImage.height
+		
+		guard let data = resizedImage.dataProvider?.data,
+			  let bytes = CFDataGetBytePtr(data) else {
 			return nil
 		}
 		
-		// Step 3: Apply Canny edge detection
-		guard let edgeImage = applyCannyEdgeDetection(blurredImage) else {
-			print("❌ Failed to detect edges")
-			return nil
+		print("🔍 Processing resized image: \(width)x\(height)")
+		
+		// Convert to grayscale and apply adaptive thresholding
+		var grayPixels: [UInt8] = []
+		let bytesPerPixel = 4
+		
+		for y in 0..<height {
+			for x in 0..<width {
+				let pixelIndex = y * width * bytesPerPixel + x * bytesPerPixel
+				let r = Int(bytes[pixelIndex])
+				let g = Int(bytes[pixelIndex + 1])
+				let b = Int(bytes[pixelIndex + 2])
+				let gray = UInt8((r + g + b) / 3)
+				grayPixels.append(gray)
+			}
 		}
 		
-		// Step 4: Find contours and detect rectangles
-		if let cardCorners = findCardCorners(edgeImage, originalSize: CGSize(width: cgImage.width, height: cgImage.height)) {
-			print("✅ Found card corners: \(cardCorners)")
+		// Apply adaptive threshold to find card edges
+		let thresholdedPixels = applyAdaptiveThreshold(grayPixels, width: width, height: height)
+		
+		// Find the largest rectangular contour
+		if let cardBounds = findLargestRectangularContour(thresholdedPixels, width: width, height: height) {
+			print("✅ Found card bounds: \(cardBounds)")
 			
-			// Step 5: Apply perspective correction
-			return perspectiveCorrectCard(image, corners: cardCorners)
+			// Scale back to original image size
+			let scaleX = CGFloat(cgImage.width) / CGFloat(width)
+			let scaleY = CGFloat(cgImage.height) / CGFloat(height)
+			
+			let scaledBounds = CGRect(
+				x: cardBounds.minX * scaleX,
+				y: cardBounds.minY * scaleY,
+				width: cardBounds.width * scaleX,
+				height: cardBounds.height * scaleY
+			)
+			
+			return cropImageToBounds(image, bounds: scaledBounds)
 		}
 		
-		print("❌ Could not find card corners")
 		return nil
 	}
 	
-	// MARK: - Image Processing Steps
+	private func applyAdaptiveThreshold(_ grayPixels: [UInt8], width: Int, height: Int) -> [Bool] {
+		var result: [Bool] = Array(repeating: false, count: grayPixels.count)
+		let windowSize = 15
+		let C = 10 // Constant subtracted from mean
+		
+		for y in 0..<height {
+			for x in 0..<width {
+				let pixelIndex = y * width + x
+				
+				// Calculate local mean
+				var sum = 0
+				var count = 0
+				
+				for dy in -windowSize/2...windowSize/2 {
+					for dx in -windowSize/2...windowSize/2 {
+						let nx = x + dx
+						let ny = y + dy
+						
+						if nx >= 0 && nx < width && ny >= 0 && ny < height {
+							let neighborIndex = ny * width + nx
+							sum += Int(grayPixels[neighborIndex])
+							count += 1
+						}
+					}
+				}
+				
+				let localMean = count > 0 ? sum / count : 128
+				let threshold = max(0, localMean - C)
+				
+				// Pixel is foreground if it's significantly darker than local mean
+				result[pixelIndex] = Int(grayPixels[pixelIndex]) < threshold
+			}
+		}
+		
+		return result
+	}
 	
-	private func prepareImageForProcessing(_ cgImage: CGImage) -> CGImage? {
+	private func findLargestRectangularContour(_ binaryPixels: [Bool], width: Int, height: Int) -> CGRect? {
+		// Use a simpler approach: find the bounding box of the largest connected component
+		// that has a reasonable aspect ratio for a card
+		
+		var visited = Array(repeating: false, count: binaryPixels.count)
+		var bestBounds: CGRect?
+		var bestArea: CGFloat = 0
+		
+		for y in 0..<height {
+			for x in 0..<width {
+				let index = y * width + x
+				
+				if binaryPixels[index] && !visited[index] {
+					// Found an unvisited foreground pixel - start flood fill
+					let bounds = floodFillAndGetBounds(binaryPixels, visited: &visited, startX: x, startY: y, width: width, height: height)
+					
+					if let bounds = bounds {
+						let area = bounds.width * bounds.height
+						let aspectRatio = bounds.width / bounds.height
+						
+						// Check if this looks like a card (reasonable size and aspect ratio)
+						let minArea = CGFloat(width * height) * 0.1 // At least 10% of image
+						let maxArea = CGFloat(width * height) * 0.8 // At most 80% of image
+						let minAspectRatio: CGFloat = 0.5
+						let maxAspectRatio: CGFloat = 1.5
+						
+						if area > minArea && area < maxArea &&
+						   aspectRatio > minAspectRatio && aspectRatio < maxAspectRatio &&
+						   area > bestArea {
+							bestBounds = bounds
+							bestArea = area
+						}
+					}
+				}
+			}
+		}
+		
+		return bestBounds
+	}
+	
+	private func floodFillAndGetBounds(_ binaryPixels: [Bool], visited: inout [Bool], startX: Int, startY: Int, width: Int, height: Int) -> CGRect? {
+		var stack: [(Int, Int)] = [(startX, startY)]
+		var minX = startX, maxX = startX
+		var minY = startY, maxY = startY
+		var pixelCount = 0
+		
+		while !stack.isEmpty {
+			let (x, y) = stack.removeLast()
+			let index = y * width + x
+			
+			if x < 0 || x >= width || y < 0 || y >= height || visited[index] || !binaryPixels[index] {
+				continue
+			}
+			
+			visited[index] = true
+			pixelCount += 1
+			
+			minX = min(minX, x)
+			maxX = max(maxX, x)
+			minY = min(minY, y)
+			maxY = max(maxY, y)
+			
+			// Add neighbors to stack
+			stack.append((x + 1, y))
+			stack.append((x - 1, y))
+			stack.append((x, y + 1))
+			stack.append((x, y - 1))
+		}
+		
+		// Only return bounds if we found enough pixels
+		guard pixelCount > 100 else { return nil }
+		
+		return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+	}
+	
+	// MARK: - Method 2: Contour Analysis with Better Filtering
+	
+	private func detectCardWithContourAnalysis(_ image: UIImage) -> UIImage? {
+		guard let cgImage = image.cgImage else { return nil }
+		
+		// Apply edge detection with better filtering
+		guard let edgeImage = createFilteredEdgeImage(cgImage) else {
+			return nil
+		}
+		
+		// Find card-like contours
+		if let cardBounds = findCardContour(edgeImage, originalSize: CGSize(width: cgImage.width, height: cgImage.height)) {
+			return cropImageToBounds(image, bounds: cardBounds)
+		}
+		
+		return nil
+	}
+	
+	private func createFilteredEdgeImage(_ cgImage: CGImage) -> CGImage? {
+		let ciImage = CIImage(cgImage: cgImage)
+		
+		// 1. Convert to grayscale
+		guard let grayscaleFilter = CIFilter(name: "CIColorControls") else { return nil }
+		grayscaleFilter.setValue(ciImage, forKey: kCIInputImageKey)
+		grayscaleFilter.setValue(0.0, forKey: kCIInputSaturationKey)
+		
+		guard let grayscaleImage = grayscaleFilter.outputImage else { return nil }
+		
+		// 2. Apply slight blur to reduce noise
+		guard let blurFilter = CIFilter(name: "CIGaussianBlur") else { return nil }
+		blurFilter.setValue(grayscaleImage, forKey: kCIInputImageKey)
+		blurFilter.setValue(1.0, forKey: kCIInputRadiusKey)
+		
+		guard let blurredImage = blurFilter.outputImage else { return nil }
+		
+		// 3. Apply edge detection
+		guard let edgeFilter = CIFilter(name: "CIEdges") else { return nil }
+		edgeFilter.setValue(blurredImage, forKey: kCIInputImageKey)
+		edgeFilter.setValue(1.5, forKey: kCIInputIntensityKey)
+		
+		guard let edgeImage = edgeFilter.outputImage else { return nil }
+		
+		// 4. Apply morphological closing to connect nearby edges
+		guard let morphologyFilter = CIFilter(name: "CIMorphologyGradient") else {
+			// Fallback without morphology
+			let context = CIContext()
+			return context.createCGImage(edgeImage, from: edgeImage.extent)
+		}
+		
+		morphologyFilter.setValue(edgeImage, forKey: kCIInputImageKey)
+		morphologyFilter.setValue(2, forKey: kCIInputRadiusKey)
+		
+		guard let morphologyImage = morphologyFilter.outputImage else { return nil }
+		
+		let context = CIContext()
+		return context.createCGImage(morphologyImage, from: morphologyImage.extent)
+	}
+	
+	private func findCardContour(_ edgeImage: CGImage, originalSize: CGSize) -> CGRect? {
+		let width = edgeImage.width
+		let height = edgeImage.height
+		
+		guard let data = edgeImage.dataProvider?.data,
+			  let bytes = CFDataGetBytePtr(data) else {
+			return nil
+		}
+		
+		// Sample edge points more selectively
+		var edgePoints: [CGPoint] = []
+		let threshold: UInt8 = 100
+		let sampleStep = 3 // Sample every 3rd pixel to reduce noise
+		
+		for y in stride(from: 0, to: height, by: sampleStep) {
+			for x in stride(from: 0, to: width, by: sampleStep) {
+				let pixelIndex = y * width + x
+				if bytes[pixelIndex] > threshold {
+					edgePoints.append(CGPoint(x: x, y: y))
+				}
+			}
+		}
+		
+		print("✅ Found \(edgePoints.count) edge points (sampled)")
+		
+		// Filter edge points to remove outliers
+		let filteredPoints = filterOutlierPoints(edgePoints, imageSize: CGSize(width: width, height: height))
+		print("✅ After filtering: \(filteredPoints.count) edge points")
+		
+		guard filteredPoints.count > 50 && filteredPoints.count < 10000 else {
+			print("❌ Invalid number of edge points: \(filteredPoints.count)")
+			return nil
+		}
+		
+		// Find bounding rectangle of filtered points
+		let minX = filteredPoints.map { $0.x }.min() ?? 0
+		let maxX = filteredPoints.map { $0.x }.max() ?? CGFloat(width)
+		let minY = filteredPoints.map { $0.y }.min() ?? 0
+		let maxY = filteredPoints.map { $0.y }.max() ?? CGFloat(height)
+		
+		let boundingRect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+		
+		// Validate the bounding rectangle
+		let area = boundingRect.width * boundingRect.height
+		let imageArea = CGFloat(width * height)
+		let aspectRatio = boundingRect.width / boundingRect.height
+		
+		guard area > imageArea * 0.1 && area < imageArea * 0.9 &&
+			  aspectRatio > 0.4 && aspectRatio < 1.8 else {
+			print("❌ Bounding rectangle failed validation")
+			return nil
+		}
+		
+		// Scale back to original size
+		let scaleX = originalSize.width / CGFloat(width)
+		let scaleY = originalSize.height / CGFloat(height)
+		
+		return CGRect(
+			x: boundingRect.minX * scaleX,
+			y: boundingRect.minY * scaleY,
+			width: boundingRect.width * scaleX,
+			height: boundingRect.height * scaleY
+		)
+	}
+	
+	private func filterOutlierPoints(_ points: [CGPoint], imageSize: CGSize) -> [CGPoint] {
+		guard points.count > 10 else { return points }
+		
+		// Remove points that are too close to image edges (likely noise)
+		let margin: CGFloat = 20
+		let edgeFiltered = points.filter { point in
+			point.x > margin && point.x < imageSize.width - margin &&
+			point.y > margin && point.y < imageSize.height - margin
+		}
+		
+		// Remove isolated points (points with no nearby neighbors)
+		let neighborRadius: CGFloat = 15
+		let neighborFiltered = edgeFiltered.filter { point in
+			let nearbyCount = edgeFiltered.filter { other in
+				let dx = point.x - other.x
+				let dy = point.y - other.y
+				return dx * dx + dy * dy < neighborRadius * neighborRadius
+			}.count
+			
+			return nearbyCount >= 3 // Must have at least 2 nearby neighbors (plus itself)
+		}
+		
+		return neighborFiltered
+	}
+	
+	// MARK: - Helper Methods
+	
+	private func resizeImageForProcessing(_ cgImage: CGImage, maxDimension: CGFloat) -> CGImage? {
 		let width = cgImage.width
 		let height = cgImage.height
 		
-		// Resize to reasonable processing size (similar to what document scanners do)
-		let maxDimension: CGFloat = 1024
 		let scale = min(maxDimension / CGFloat(width), maxDimension / CGFloat(height))
+		
+		// Don't upscale
+		guard scale < 1.0 else { return cgImage }
 		
 		let newWidth = Int(CGFloat(width) * scale)
 		let newHeight = Int(CGFloat(height) * scale)
 		
-		let colorSpace = CGColorSpaceCreateDeviceGray()
-		let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
+		let colorSpace = CGColorSpaceCreateDeviceRGB()
+		let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
 		
 		guard let context = CGContext(data: nil,
 									width: newWidth,
 									height: newHeight,
 									bitsPerComponent: 8,
-									bytesPerRow: newWidth,
+									bytesPerRow: newWidth * 4,
 									space: colorSpace,
 									bitmapInfo: bitmapInfo.rawValue) else {
 			return nil
@@ -100,359 +390,29 @@ class CardCropper {
 		return context.makeImage()
 	}
 	
-	private func applyGaussianBlur(_ cgImage: CGImage) -> CGImage? {
-		let ciImage = CIImage(cgImage: cgImage)
-		
-		guard let blurFilter = CIFilter(name: "CIGaussianBlur") else { return nil }
-		blurFilter.setValue(ciImage, forKey: kCIInputImageKey)
-		blurFilter.setValue(2.0, forKey: kCIInputRadiusKey) // Small blur to reduce noise
-		
-		guard let outputImage = blurFilter.outputImage else { return nil }
-		
-		let context = CIContext()
-		return context.createCGImage(outputImage, from: outputImage.extent)
-	}
-	
-	private func applyCannyEdgeDetection(_ cgImage: CGImage) -> CGImage? {
-		// Implement Canny-like edge detection using Core Image
-		let ciImage = CIImage(cgImage: cgImage)
-		
-		// Apply edge detection filter
-		guard let edgeFilter = CIFilter(name: "CIEdges") else { return nil }
-		edgeFilter.setValue(ciImage, forKey: kCIInputImageKey)
-		edgeFilter.setValue(1.0, forKey: kCIInputIntensityKey)
-		
-		guard let edgeOutput = edgeFilter.outputImage else { return nil }
-		
-		// Apply threshold to create binary edge image
-		guard let thresholdFilter = CIFilter(name: "CIColorThreshold") else {
-			// Fallback if CIColorThreshold is not available
-			let context = CIContext()
-			return context.createCGImage(edgeOutput, from: edgeOutput.extent)
-		}
-		
-		thresholdFilter.setValue(edgeOutput, forKey: kCIInputImageKey)
-		thresholdFilter.setValue(0.1, forKey: "inputThreshold") // Adjust threshold as needed
-		
-		guard let thresholdOutput = thresholdFilter.outputImage else { return nil }
-		
-		let context = CIContext()
-		return context.createCGImage(thresholdOutput, from: thresholdOutput.extent)
-	}
-	
-	private func findCardCorners(_ edgeImage: CGImage, originalSize: CGSize) -> [CGPoint]? {
-		let width = edgeImage.width
-		let height = edgeImage.height
-		
-		guard let data = edgeImage.dataProvider?.data,
-			  let bytes = CFDataGetBytePtr(data) else {
-			return nil
-		}
-		
-		// Find edge pixels
-		var edgePoints: [CGPoint] = []
-		let threshold: UInt8 = 128
-		
-		for y in 0..<height {
-			for x in 0..<width {
-				let pixelIndex = y * width + x
-				if bytes[pixelIndex] > threshold {
-					edgePoints.append(CGPoint(x: x, y: y))
-				}
-			}
-		}
-		
-		guard edgePoints.count > 100 else {
-			print("❌ Not enough edge points found: \(edgePoints.count)")
-			return nil
-		}
-		
-		print("✅ Found \(edgePoints.count) edge points")
-		
-		// Find the convex hull of edge points
-		let hull = convexHull(edgePoints)
-		
-		guard hull.count >= 4 else {
-			print("❌ Convex hull has too few points: \(hull.count)")
-			return nil
-		}
-		
-		// Find the best 4-sided approximation of the hull (Douglas-Peucker style)
-		let approximatedCorners = approximatePolygon(hull, targetCorners: 4)
-		
-		guard approximatedCorners.count == 4 else {
-			print("❌ Could not approximate to 4 corners, got \(approximatedCorners.count)")
-			return nil
-		}
-		
-		// Scale corners back to original image size
-		let scaleX = originalSize.width / CGFloat(width)
-		let scaleY = originalSize.height / CGFloat(height)
-		
-		let scaledCorners = approximatedCorners.map { point in
-			CGPoint(x: point.x * scaleX, y: point.y * scaleY)
-		}
-		
-		// Sort corners in proper order: top-left, top-right, bottom-right, bottom-left
-		return sortCornersForPerspectiveCorrection(scaledCorners)
-	}
-	
-	// MARK: - Geometric Algorithms
-	
-	private func convexHull(_ points: [CGPoint]) -> [CGPoint] {
-		// Graham scan algorithm for convex hull
-		guard points.count > 2 else { return points }
-		
-		// Find the bottom-most point (and leftmost in case of tie)
-		let start = points.min { p1, p2 in
-			if p1.y != p2.y {
-				return p1.y < p2.y
-			}
-			return p1.x < p2.x
-		}!
-		
-		// Sort points by polar angle with respect to start point
-		let sortedPoints = points.filter { $0 != start }.sorted { p1, p2 in
-			let angle1 = atan2(p1.y - start.y, p1.x - start.x)
-			let angle2 = atan2(p2.y - start.y, p2.x - start.x)
-			if angle1 != angle2 {
-				return angle1 < angle2
-			}
-			// If angles are equal, prefer closer point
-			let dist1 = distance(start, p1)
-			let dist2 = distance(start, p2)
-			return dist1 < dist2
-		}
-		
-		// Build convex hull
-		var hull: [CGPoint] = [start]
-		
-		for point in sortedPoints {
-			// Remove points that would create a right turn
-			while hull.count > 1 && crossProduct(hull[hull.count-2], hull[hull.count-1], point) <= 0 {
-				hull.removeLast()
-			}
-			hull.append(point)
-		}
-		
-		return hull
-	}
-	
-	private func approximatePolygon(_ points: [CGPoint], targetCorners: Int) -> [CGPoint] {
-		// Simplified polygon approximation
-		guard points.count > targetCorners else { return points }
-		
-		// Find the 4 points that are most likely to be corners of a rectangle
-		let centroid = CGPoint(
-			x: points.map { $0.x }.reduce(0, +) / CGFloat(points.count),
-			y: points.map { $0.y }.reduce(0, +) / CGFloat(points.count)
-		)
-		
-		// Divide into quadrants and find the most extreme point in each
-		var topLeft: CGPoint?
-		var topRight: CGPoint?
-		var bottomLeft: CGPoint?
-		var bottomRight: CGPoint?
-		
-		var maxTL = CGFloat.infinity
-		var maxTR = CGFloat.infinity
-		var maxBL = CGFloat.infinity
-		var maxBR = CGFloat.infinity
-		
-		for point in points {
-			let dx = point.x - centroid.x
-			let dy = point.y - centroid.y
-			
-			if dx <= 0 && dy <= 0 { // Top-left quadrant
-				let dist = dx * dx + dy * dy
-				if dist < maxTL {
-					maxTL = dist
-					topLeft = point
-				}
-			} else if dx > 0 && dy <= 0 { // Top-right quadrant
-				let dist = dx * dx + dy * dy
-				if dist < maxTR {
-					maxTR = dist
-					topRight = point
-				}
-			} else if dx <= 0 && dy > 0 { // Bottom-left quadrant
-				let dist = dx * dx + dy * dy
-				if dist < maxBL {
-					maxBL = dist
-					bottomLeft = point
-				}
-			} else if dx > 0 && dy > 0 { // Bottom-right quadrant
-				let dist = dx * dx + dy * dy
-				if dist < maxBR {
-					maxBR = dist
-					bottomRight = point
-				}
-			}
-		}
-		
-		var corners: [CGPoint] = []
-		if let tl = topLeft { corners.append(tl) }
-		if let tr = topRight { corners.append(tr) }
-		if let br = bottomRight { corners.append(br) }
-		if let bl = bottomLeft { corners.append(bl) }
-		
-		return corners
-	}
-	
-	private func sortCornersForPerspectiveCorrection(_ corners: [CGPoint]) -> [CGPoint] {
-		guard corners.count == 4 else { return corners }
-		
-		// Find centroid
-		let centroid = CGPoint(
-			x: corners.map { $0.x }.reduce(0, +) / 4,
-			y: corners.map { $0.y }.reduce(0, +) / 4
-		)
-		
-		// Sort by angle from centroid
-		let sortedCorners = corners.sorted { p1, p2 in
-			let angle1 = atan2(p1.y - centroid.y, p1.x - centroid.x)
-			let angle2 = atan2(p2.y - centroid.y, p2.x - centroid.x)
-			return angle1 < angle2
-		}
-		
-		// The sorted corners should now be in order: top-left, top-right, bottom-right, bottom-left
-		// But we need to ensure they're in the correct quadrants
-		var topLeft = sortedCorners[0]
-		var topRight = sortedCorners[1]
-		var bottomRight = sortedCorners[2]
-		var bottomLeft = sortedCorners[3]
-		
-		// Verify and adjust if needed
-		if topLeft.x > topRight.x {
-			swap(&topLeft, &topRight)
-		}
-		if bottomLeft.x > bottomRight.x {
-			swap(&bottomLeft, &bottomRight)
-		}
-		if topLeft.y > bottomLeft.y {
-			swap(&topLeft, &bottomLeft)
-		}
-		if topRight.y > bottomRight.y {
-			swap(&topRight, &bottomRight)
-		}
-		
-		return [topLeft, topRight, bottomRight, bottomLeft]
-	}
-	
-	// MARK: - Perspective Correction
-	
-	private func perspectiveCorrectCard(_ image: UIImage, corners: [CGPoint]) -> UIImage? {
-		guard corners.count == 4, let cgImage = image.cgImage else { return nil }
-		
-		let topLeft = corners[0]
-		let topRight = corners[1]
-		let bottomRight = corners[2]
-		let bottomLeft = corners[3]
-		
-		print("📍 Applying perspective correction with corners:")
-		print("   TL: \(topLeft), TR: \(topRight)")
-		print("   BL: \(bottomLeft), BR: \(bottomRight)")
-		
-		// Calculate the dimensions of the corrected card
-		let topWidth = distance(topLeft, topRight)
-		let bottomWidth = distance(bottomLeft, bottomRight)
-		let leftHeight = distance(topLeft, bottomLeft)
-		let rightHeight = distance(topRight, bottomRight)
-		
-		let outputWidth = max(topWidth, bottomWidth)
-		let outputHeight = max(leftHeight, rightHeight)
-		
-		print("📐 Output dimensions: \(outputWidth) x \(outputHeight)")
-		
-		// Apply perspective correction
-		let ciImage = CIImage(cgImage: cgImage)
-		
-		guard let perspectiveFilter = CIFilter(name: "CIPerspectiveCorrection") else {
-			return nil
-		}
-		
-		perspectiveFilter.setValue(ciImage, forKey: kCIInputImageKey)
-		perspectiveFilter.setValue(CIVector(cgPoint: topLeft), forKey: "inputTopLeft")
-		perspectiveFilter.setValue(CIVector(cgPoint: topRight), forKey: "inputTopRight")
-		perspectiveFilter.setValue(CIVector(cgPoint: bottomLeft), forKey: "inputBottomLeft")
-		perspectiveFilter.setValue(CIVector(cgPoint: bottomRight), forKey: "inputBottomRight")
-		
-		guard let outputImage = perspectiveFilter.outputImage else {
-			return nil
-		}
-		
-		let context = CIContext()
-		guard let correctedCGImage = context.createCGImage(outputImage, from: outputImage.extent) else {
-			return nil
-		}
-		
-		let correctedImage = UIImage(cgImage: correctedCGImage)
-		return ensurePortraitOrientation(correctedImage)
-	}
-	
-	// MARK: - Fallback Methods
-	
-	private func intelligentFallbackCrop(_ image: UIImage) -> UIImage? {
-		print("🔄 Applying intelligent fallback crop")
-		
-		// Try to find the card using contrast analysis
-		if let contrastCropped = cropUsingContrastAnalysis(image) {
-			return contrastCropped
-		}
-		
-		// Final fallback: smart center crop
-		return smartCenterCrop(image)
-	}
-	
-	private func cropUsingContrastAnalysis(_ image: UIImage) -> UIImage? {
+	private func cropImageToBounds(_ image: UIImage, bounds: CGRect) -> UIImage? {
 		guard let cgImage = image.cgImage else { return nil }
 		
-		let width = cgImage.width
-		let height = cgImage.height
+		let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
+		let clampedBounds = bounds.intersection(CGRect(origin: .zero, size: imageSize))
 		
-		guard let data = cgImage.dataProvider?.data,
-			  let bytes = CFDataGetBytePtr(data) else {
+		guard !clampedBounds.isEmpty else {
 			return nil
 		}
 		
-		let bytesPerPixel = 4
-		let bytesPerRow = width * bytesPerPixel
+		// Add some padding to ensure we don't cut off the card edges
+		let paddingPercent: CGFloat = 0.02 // 2% padding
+		let paddingX = clampedBounds.width * paddingPercent
+		let paddingY = clampedBounds.height * paddingPercent
 		
-		// Sample the image to find areas of high contrast (likely card edges)
-		let sampleStep = 20
-		var minX = width, maxX = 0
-		var minY = height, maxY = 0
+		let paddedBounds = CGRect(
+			x: max(0, clampedBounds.minX - paddingX),
+			y: max(0, clampedBounds.minY - paddingY),
+			width: min(imageSize.width - max(0, clampedBounds.minX - paddingX), clampedBounds.width + 2 * paddingX),
+			height: min(imageSize.height - max(0, clampedBounds.minY - paddingY), clampedBounds.height + 2 * paddingY)
+		)
 		
-		for y in stride(from: sampleStep, to: height - sampleStep, by: sampleStep) {
-			for x in stride(from: sampleStep, to: width - sampleStep, by: sampleStep) {
-				let contrast = calculateLocalContrast(bytes, x: x, y: y, bytesPerRow: bytesPerRow)
-				
-				if contrast > 0.2 { // Threshold for significant contrast
-					minX = min(minX, x)
-					maxX = max(maxX, x)
-					minY = min(minY, y)
-					maxY = max(maxY, y)
-				}
-			}
-		}
-		
-		// Add padding and validate
-		let padding = 50
-		minX = max(0, minX - padding)
-		minY = max(0, minY - padding)
-		maxX = min(width, maxX + padding)
-		maxY = min(height, maxY + padding)
-		
-		let cropWidth = maxX - minX
-		let cropHeight = maxY - minY
-		
-		guard cropWidth > width / 4 && cropHeight > height / 4 else {
-			return nil
-		}
-		
-		let cropRect = CGRect(x: minX, y: minY, width: cropWidth, height: cropHeight)
-		
-		guard let croppedCGImage = cgImage.cropping(to: cropRect) else {
+		guard let croppedCGImage = cgImage.cropping(to: paddedBounds) else {
 			return nil
 		}
 		
@@ -463,16 +423,18 @@ class CardCropper {
 	private func smartCenterCrop(_ image: UIImage) -> UIImage? {
 		guard let cgImage = image.cgImage else { return nil }
 		
+		print("🔄 Applying smart center crop")
+		
 		let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
 		let aspectRatio = imageSize.width / imageSize.height
 		
-		// Create a crop rect that's likely to contain the card
+		// Create a crop rect based on typical card photography scenarios
 		var cropRect: CGRect
 		
-		if aspectRatio > 1.2 {
-			// Landscape - crop to portrait card ratio
-			let cardAspectRatio: CGFloat = 2.5 / 3.5
-			let cropHeight = imageSize.height * 0.8
+		if aspectRatio > 1.3 {
+			// Landscape image - assume card is in center, crop to card aspect ratio
+			let cardAspectRatio: CGFloat = 2.5 / 3.5 // Standard trading card
+			let cropHeight = imageSize.height * 0.75
 			let cropWidth = cropHeight * cardAspectRatio
 			
 			cropRect = CGRect(
@@ -482,8 +444,8 @@ class CardCropper {
 				height: cropHeight
 			)
 		} else {
-			// Portrait or square - crop 75% from center
-			let cropScale: CGFloat = 0.75
+			// Portrait or square - crop 70% from center
+			let cropScale: CGFloat = 0.7
 			let cropWidth = imageSize.width * cropScale
 			let cropHeight = imageSize.height * cropScale
 			
@@ -503,48 +465,6 @@ class CardCropper {
 		return ensurePortraitOrientation(croppedImage)
 	}
 	
-	// MARK: - Helper Functions
-	
-	private func distance(_ p1: CGPoint, _ p2: CGPoint) -> CGFloat {
-		let dx = p1.x - p2.x
-		let dy = p1.y - p2.y
-		return sqrt(dx * dx + dy * dy)
-	}
-	
-	private func crossProduct(_ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint) -> CGFloat {
-		return (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)
-	}
-	
-	private func calculateLocalContrast(_ bytes: UnsafePointer<UInt8>, x: Int, y: Int, bytesPerRow: Int) -> Double {
-		let bytesPerPixel = 4
-		let centerIndex = y * bytesPerRow + x * bytesPerPixel
-		
-		let centerBrightness = Double(bytes[centerIndex]) // Red channel for grayscale
-		
-		// Sample surrounding pixels
-		var brightnesses: [Double] = []
-		let radius = 10
-		
-		for dy in -radius...radius {
-			for dx in -radius...radius {
-				let nx = x + dx
-				let ny = y + dy
-				
-				if nx >= 0 && ny >= 0 && nx < bytesPerRow / bytesPerPixel && ny < bytesPerRow / bytesPerPixel {
-					let index = ny * bytesPerRow + nx * bytesPerPixel
-					brightnesses.append(Double(bytes[index]))
-				}
-			}
-		}
-		
-		guard !brightnesses.isEmpty else { return 0 }
-		
-		let avgBrightness = brightnesses.reduce(0, +) / Double(brightnesses.count)
-		let variance = brightnesses.map { pow($0 - avgBrightness, 2) }.reduce(0, +) / Double(brightnesses.count)
-		
-		return sqrt(variance) / 255.0 // Normalize to 0-1
-	}
-	
 	private func ensurePortraitOrientation(_ image: UIImage) -> UIImage {
 		let size = image.size
 		
@@ -560,7 +480,7 @@ class CardCropper {
 		guard let cgImage = image.cgImage else { return image }
 		
 		let originalSize = CGSize(width: cgImage.width, height: cgImage.height)
-		let rotatedSize = CGSize(width: originalSize.height, height: originalSize.width)
+		let rotatedSize = CGSize(width: originalSize.width, height: originalSize.height)
 		
 		UIGraphicsBeginImageContextWithOptions(rotatedSize, false, image.scale)
 		defer { UIGraphicsEndImageContext() }
