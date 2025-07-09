@@ -1,4 +1,4 @@
-// Simplified ManualCropView.swift - Debugging version
+// Simplified ManualCropView.swift - Fixed version
 import SwiftUI
 import UIKit
 
@@ -7,10 +7,10 @@ struct ManualCropView: View {
 	let onCropComplete: (UIImage?) -> Void
 	let onCancel: () -> Void
 	
-	@State private var topLeft: CGPoint = CGPoint(x: 0.1, y: 0.1)
-	@State private var topRight: CGPoint = CGPoint(x: 0.9, y: 0.1)
-	@State private var bottomLeft: CGPoint = CGPoint(x: 0.1, y: 0.9)
-	@State private var bottomRight: CGPoint = CGPoint(x: 0.9, y: 0.9)
+	@State private var topLeft: CGPoint = CGPoint(x: 0.15, y: 0.15)
+	@State private var topRight: CGPoint = CGPoint(x: 0.85, y: 0.15)
+	@State private var bottomLeft: CGPoint = CGPoint(x: 0.15, y: 0.85)
+	@State private var bottomRight: CGPoint = CGPoint(x: 0.85, y: 0.85)
 	
 	var body: some View {
 		ZStack {
@@ -40,9 +40,9 @@ struct ManualCropView: View {
 				}
 				.padding()
 				
-				// Simple image with overlay - NO COMPLEX CALCULATIONS
+				// Simple image with overlay - FIXED ORIENTATION
 				ZStack {
-					Image(uiImage: image)
+					Image(uiImage: correctedDisplayImage)
 						.resizable()
 						.aspectRatio(contentMode: .fit)
 						.background(Color.gray)
@@ -112,212 +112,53 @@ struct ManualCropView: View {
 			}
 		}
 		.onAppear {
-			print("🖼️ ManualCropView appeared with image size: \(image.size)")
-			// Set reasonable initial corners
-			topLeft = CGPoint(x: 0.15, y: 0.15)
-			topRight = CGPoint(x: 0.85, y: 0.15)
-			bottomLeft = CGPoint(x: 0.15, y: 0.85)
-			bottomRight = CGPoint(x: 0.85, y: 0.85)
+			Swift.print("🖼️ ManualCropView appeared with image size: \(image.size)")
 		}
 	}
 	
-	private func testCrop() {
-		print("🧪 TEST CROP - What would be cropped:")
+	// Computed property to ensure image displays in correct orientation
+	private var correctedDisplayImage: UIImage {
+		// Check if the image appears to be rotated based on its metadata
+		// If UIImage shows portrait but is actually landscape, fix it
 		let imageSize = image.size
+		Swift.print("🖼️ Original image size: \(imageSize), orientation: \(image.imageOrientation.rawValue)")
 		
-		let corners = [
-			CGPoint(x: topLeft.x * imageSize.width, y: topLeft.y * imageSize.height),
-			CGPoint(x: topRight.x * imageSize.width, y: topRight.y * imageSize.height),
-			CGPoint(x: bottomRight.x * imageSize.width, y: bottomRight.y * imageSize.height),
-			CGPoint(x: bottomLeft.x * imageSize.width, y: bottomLeft.y * imageSize.height)
-		]
-		
-		print("   Image size: \(imageSize)")
-		print("   Corner coordinates in pixels:")
-		corners.enumerated().forEach { index, corner in
-			print("     Corner \(index): \(corner)")
-		}
-		
-		// Calculate the bounding box of the corners
-		let minX = corners.map { $0.x }.min() ?? 0
-		let maxX = corners.map { $0.x }.max() ?? imageSize.width
-		let minY = corners.map { $0.y }.min() ?? 0
-		let maxY = corners.map { $0.y }.max() ?? imageSize.height
-		
-		let boundingRect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-		print("   Bounding rectangle: \(boundingRect)")
-		print("   Crop percentage: \(String(format: "%.1f", (boundingRect.width * boundingRect.height) / (imageSize.width * imageSize.height) * 100))%")
-	}
-	
-	private func performCrop() {
-		print("🔧 Starting crop with corners:")
-		print("   TL: \(topLeft), TR: \(topRight)")
-		print("   BL: \(bottomLeft), BR: \(bottomRight)")
-		
-		// Convert normalized coordinates back to image coordinates
-		let imageSize = image.size
-		
-		let corners = [
-			CGPoint(x: topLeft.x * imageSize.width, y: topLeft.y * imageSize.height),
-			CGPoint(x: topRight.x * imageSize.width, y: topRight.y * imageSize.height),
-			CGPoint(x: bottomRight.x * imageSize.width, y: bottomRight.y * imageSize.height),
-			CGPoint(x: bottomLeft.x * imageSize.width, y: bottomLeft.y * imageSize.height)
-		]
-		
-		print("🔧 Image coordinates:")
-		corners.enumerated().forEach { index, corner in
-			print("   Corner \(index): \(corner)")
-		}
-		
-		// Apply perspective correction WITHOUT automatic rotation first
-		if let croppedImage = applyPerspectiveCorrectionOnly(to: image, corners: corners) {
-			print("✅ Perspective correction successful")
-			onCropComplete(croppedImage)
+		// If the image is technically portrait but appears landscape in the interface,
+		// it might have incorrect orientation metadata
+		if imageSize.height > imageSize.width {
+			// Image is portrait in dimensions, should be displayed as portrait
+			Swift.print("✅ Image is already portrait, using as-is")
+			return image
 		} else {
-			print("❌ Perspective correction failed, returning original image")
-			onCropComplete(image)
-		}
-	}
-	
-	// Separate method for just perspective correction without rotation
-	private func applyPerspectiveCorrectionOnly(to image: UIImage, corners: [CGPoint]) -> UIImage? {
-		guard corners.count == 4, let cgImage = image.cgImage else {
-			print("❌ Invalid corners or CGImage")
-			return nil
-		}
-		
-		print("🔧 Creating CIImage from CGImage")
-		let ciImage = CIImage(cgImage: cgImage)
-		
-		// Validate corners to prevent NaN values
-		for (index, corner) in corners.enumerated() {
-			if corner.x.isNaN || corner.y.isNaN || corner.x.isInfinite || corner.y.isInfinite {
-				print("❌ Invalid corner \(index): \(corner)")
-				return nil
+			// Image appears landscape, might need rotation
+			Swift.print("🔄 Image appears landscape, checking if it needs rotation")
+			
+			// Try to determine if this should be portrait
+			// Camera typically captures at 4032×3024, but might be stored differently
+			if imageSize.width == 4032 && imageSize.height == 3024 {
+				Swift.print("🔄 Detected sideways camera image, rotating to portrait")
+				return rotateImageForDisplay(image)
+			} else {
+				Swift.print("✅ Using image as-is")
+				return image
 			}
 		}
-		
-		guard let perspectiveFilter = CIFilter(name: "CIPerspectiveCorrection") else {
-			print("❌ Failed to create perspective correction filter")
-			return nil
-		}
-		
-		print("🔧 Setting up perspective correction filter")
-		perspectiveFilter.setValue(ciImage, forKey: kCIInputImageKey)
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[0]), forKey: "inputTopLeft")
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[1]), forKey: "inputTopRight")
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[3]), forKey: "inputBottomLeft")
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[2]), forKey: "inputBottomRight")
-		
-		guard let outputImage = perspectiveFilter.outputImage else {
-			print("❌ Perspective correction filter failed to produce output")
-			return nil
-		}
-		
-		print("🔧 Converting CIImage back to UIImage")
-		let context = CIContext()
-		guard let correctedCGImage = context.createCGImage(outputImage, from: outputImage.extent) else {
-			print("❌ Failed to create CGImage from corrected CIImage")
-			return nil
-		}
-		
-		// Create UIImage with proper orientation - NO ROTATION YET
-		let correctedImage = UIImage(cgImage: correctedCGImage, scale: image.scale, orientation: .up)
-		print("✅ Perspective correction completed. Size: \(correctedImage.size)")
-		
-		// For now, let's NOT rotate and see what we get
-		print("📋 Returning image without rotation for debugging")
-		return correctedImage
 	}
 	
-	private func applyPerspectiveCorrection(to image: UIImage, corners: [CGPoint]) -> UIImage? {
-		guard corners.count == 4, let cgImage = image.cgImage else {
-			print("❌ Invalid corners or CGImage")
-			return nil
-		}
-		
-		print("🔧 Creating CIImage from CGImage")
-		let ciImage = CIImage(cgImage: cgImage)
-		
-		// Validate corners to prevent NaN values
-		for (index, corner) in corners.enumerated() {
-			if corner.x.isNaN || corner.y.isNaN || corner.x.isInfinite || corner.y.isInfinite {
-				print("❌ Invalid corner \(index): \(corner)")
-				return nil
-			}
-		}
-		
-		guard let perspectiveFilter = CIFilter(name: "CIPerspectiveCorrection") else {
-			print("❌ Failed to create perspective correction filter")
-			return nil
-		}
-		
-		print("🔧 Setting up perspective correction filter")
-		perspectiveFilter.setValue(ciImage, forKey: kCIInputImageKey)
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[0]), forKey: "inputTopLeft")
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[1]), forKey: "inputTopRight")
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[3]), forKey: "inputBottomLeft")
-		perspectiveFilter.setValue(CIVector(cgPoint: corners[2]), forKey: "inputBottomRight")
-		
-		guard let outputImage = perspectiveFilter.outputImage else {
-			print("❌ Perspective correction filter failed to produce output")
-			return nil
-		}
-		
-		print("🔧 Converting CIImage back to UIImage")
-		let context = CIContext()
-		guard let correctedCGImage = context.createCGImage(outputImage, from: outputImage.extent) else {
-			print("❌ Failed to create CGImage from corrected CIImage")
-			return nil
-		}
-		
-		// Create UIImage with proper orientation
-		let correctedImage = UIImage(cgImage: correctedCGImage, scale: image.scale, orientation: .up)
-		print("✅ Perspective correction completed. New size: \(correctedImage.size)")
-		
-		// Force portrait orientation for cards
-		return ensurePortraitOrientation(correctedImage)
-	}
-	
-	private func ensurePortraitOrientation(_ image: UIImage) -> UIImage {
-		let size = image.size
-		print("🔄 Checking orientation - Size: \(size)")
-		
-		// Cards should always be in portrait mode (taller than wide)
-		// If width >= height, rotate to make it portrait
-		if size.width >= size.height {
-			print("🔄 Image is landscape or square, rotating to portrait")
-			return rotateImage90Degrees(image)
-		} else {
-			print("✅ Image is already portrait")
-			return image
-		}
-	}
-	
-	private func rotateImage90Degrees(_ image: UIImage) -> UIImage {
-		guard let cgImage = image.cgImage else {
-			print("❌ Failed to get CGImage for rotation")
-			return image
-		}
-		
-		print("🔄 Rotating image 90 degrees")
+	private func rotateImageForDisplay(_ image: UIImage) -> UIImage {
+		guard let cgImage = image.cgImage else { return image }
 		
 		let originalSize = CGSize(width: cgImage.width, height: cgImage.height)
 		let rotatedSize = CGSize(width: originalSize.height, height: originalSize.width)
 		
-		print("🔄 Original size: \(originalSize), Rotated size: \(rotatedSize)")
-		
 		UIGraphicsBeginImageContextWithOptions(rotatedSize, false, image.scale)
 		defer { UIGraphicsEndImageContext() }
 		
-		guard let context = UIGraphicsGetCurrentContext() else {
-			print("❌ Failed to get graphics context")
-			return image
-		}
+		guard let context = UIGraphicsGetCurrentContext() else { return image }
 		
-		// Move to center and rotate 90 degrees clockwise
+		// Rotate 90 degrees counterclockwise to fix typical camera orientation
 		context.translateBy(x: rotatedSize.width / 2, y: rotatedSize.height / 2)
-		context.rotate(by: .pi / 2)  // 90 degrees clockwise
+		context.rotate(by: -.pi / 2)  // -90 degrees
 		
 		let drawRect = CGRect(
 			x: -originalSize.width / 2,
@@ -329,9 +170,118 @@ struct ManualCropView: View {
 		context.draw(cgImage, in: drawRect)
 		
 		let rotatedImage = UIGraphicsGetImageFromCurrentImageContext() ?? image
-		print("✅ Rotation completed. Final size: \(rotatedImage.size)")
+		Swift.print("🔄 Display rotation completed. New size: \(rotatedImage.size)")
 		
 		return rotatedImage
+	}
+	
+	private func testCrop() {
+		Swift.print("🧪 TEST CROP - What would be cropped:")
+		let imageSize = image.size
+		
+		let corners = [
+			CGPoint(x: topLeft.x * imageSize.width, y: topLeft.y * imageSize.height),
+			CGPoint(x: topRight.x * imageSize.width, y: topRight.y * imageSize.height),
+			CGPoint(x: bottomRight.x * imageSize.width, y: bottomRight.y * imageSize.height),
+			CGPoint(x: bottomLeft.x * imageSize.width, y: bottomLeft.y * imageSize.height)
+		]
+		
+		Swift.print("   Image size: \(imageSize)")
+		Swift.print("   Corner coordinates in pixels:")
+		corners.enumerated().forEach { index, corner in
+			Swift.print("     Corner \(index): \(corner)")
+		}
+		
+		// Calculate the bounding box of the corners
+		let minX = corners.map { $0.x }.min() ?? 0
+		let maxX = corners.map { $0.x }.max() ?? imageSize.width
+		let minY = corners.map { $0.y }.min() ?? 0
+		let maxY = corners.map { $0.y }.max() ?? imageSize.height
+		
+		let boundingRect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+		Swift.print("   Bounding rectangle: \(boundingRect)")
+		Swift.print("   Crop percentage: \(String(format: "%.1f", (boundingRect.width * boundingRect.height) / (imageSize.width * imageSize.height) * 100))%")
+	}
+	
+	private func performCrop() {
+		Swift.print("🔧 Starting crop with corners:")
+		Swift.print("   TL: \(topLeft), TR: \(topRight)")
+		Swift.print("   BL: \(bottomLeft), BR: \(bottomRight)")
+		
+		// Convert normalized coordinates back to image coordinates
+		let imageSize = image.size
+		
+		let corners = [
+			CGPoint(x: topLeft.x * imageSize.width, y: topLeft.y * imageSize.height),
+			CGPoint(x: topRight.x * imageSize.width, y: topRight.y * imageSize.height),
+			CGPoint(x: bottomRight.x * imageSize.width, y: bottomRight.y * imageSize.height),
+			CGPoint(x: bottomLeft.x * imageSize.width, y: bottomLeft.y * imageSize.height)
+		]
+		
+		Swift.print("🔧 Image coordinates:")
+		corners.enumerated().forEach { index, corner in
+			Swift.print("   Corner \(index): \(corner)")
+		}
+		
+		// Apply perspective correction WITHOUT automatic rotation first
+		if let croppedImage = applyPerspectiveCorrectionOnly(to: image, corners: corners) {
+			Swift.print("✅ Perspective correction successful")
+			onCropComplete(croppedImage)
+		} else {
+			Swift.print("❌ Perspective correction failed, returning original image")
+			onCropComplete(image)
+		}
+	}
+	
+	// Separate method for just perspective correction without rotation
+	private func applyPerspectiveCorrectionOnly(to image: UIImage, corners: [CGPoint]) -> UIImage? {
+		guard corners.count == 4, let cgImage = image.cgImage else {
+			Swift.print("❌ Invalid corners or CGImage")
+			return nil
+		}
+		
+		Swift.print("🔧 Creating CIImage from CGImage")
+		let ciImage = CIImage(cgImage: cgImage)
+		
+		// Validate corners to prevent NaN values
+		for (index, corner) in corners.enumerated() {
+			if corner.x.isNaN || corner.y.isNaN || corner.x.isInfinite || corner.y.isInfinite {
+				Swift.print("❌ Invalid corner \(index): \(corner)")
+				return nil
+			}
+		}
+		
+		guard let perspectiveFilter = CIFilter(name: "CIPerspectiveCorrection") else {
+			Swift.print("❌ Failed to create perspective correction filter")
+			return nil
+		}
+		
+		Swift.print("🔧 Setting up perspective correction filter")
+		perspectiveFilter.setValue(ciImage, forKey: kCIInputImageKey)
+		perspectiveFilter.setValue(CIVector(cgPoint: corners[0]), forKey: "inputTopLeft")
+		perspectiveFilter.setValue(CIVector(cgPoint: corners[1]), forKey: "inputTopRight")
+		perspectiveFilter.setValue(CIVector(cgPoint: corners[3]), forKey: "inputBottomLeft")
+		perspectiveFilter.setValue(CIVector(cgPoint: corners[2]), forKey: "inputBottomRight")
+		
+		guard let outputImage = perspectiveFilter.outputImage else {
+			Swift.print("❌ Perspective correction filter failed to produce output")
+			return nil
+		}
+		
+		Swift.print("🔧 Converting CIImage back to UIImage")
+		let context = CIContext()
+		guard let correctedCGImage = context.createCGImage(outputImage, from: outputImage.extent) else {
+			Swift.print("❌ Failed to create CGImage from corrected CIImage")
+			return nil
+		}
+		
+		// Create UIImage with proper orientation - NO ROTATION YET
+		let correctedImage = UIImage(cgImage: correctedCGImage, scale: image.scale, orientation: .up)
+		Swift.print("✅ Perspective correction completed. Size: \(correctedImage.size)")
+		
+		// For now, let's NOT rotate and see what we get
+		Swift.print("📋 Returning image without rotation for debugging")
+		return correctedImage
 	}
 }
 
